@@ -87,6 +87,7 @@ function isDebugEnabled() {
 
 function toUserHintFromErrorMessage(msg: string) {
   const m = msg.toLowerCase();
+  if (m.includes("opencv not ready")) return "Vision engine is still loading. Please wait and try again.";
   if (m.includes("reference card")) return "Reposition the reference card and try again.";
   if (m.includes("scale")) return "Move closer and reposition the card.";
   if (m.includes("foot")) return "Reposition your foot and ensure it is fully visible.";
@@ -130,7 +131,21 @@ export async function runPipelineFromVideo(
 
   let lastFailure: string | undefined;
 
-  onProgress("warming-up", 2, "Initializing vision engine…");
+  // --- Worker / OpenCV readiness gate (critical for mobile) ---
+  onProgress("warming-up", 2, "Loading vision engine…");
+
+  // If worker doesn't expose ensureOpenCvReady yet, this will throw, and we surface a helpful message.
+  try {
+    const health = await worker.ensureOpenCvReady?.();
+    if (!health || health.ok !== true) {
+      throw new Error("OpenCV not ready in worker.");
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "OpenCV not ready in worker.";
+    throw new Error(toUserHintFromErrorMessage(msg));
+  }
+
+  onProgress("warming-up", 6, "Initializing camera pipeline…");
 
   while (performance.now() - start < maxMs) {
     totalFrames += 1;
@@ -163,7 +178,7 @@ export async function runPipelineFromVideo(
     if (stab.stability > bestStability) bestStability = stab.stability;
     if (stab.motion < bestMotion) bestMotion = stab.motion;
 
-    // Warmup UX
+    // Warm-up UX
     if (lengthSamples.length === 0) {
       const warmTarget = 55;
       const p = normalizeProgress((usableFrames / Math.max(1, minGoodFrames)) * warmTarget);
@@ -190,10 +205,9 @@ export async function runPipelineFromVideo(
       onProgress("detecting-card", 60, "Detecting reference card…");
 
       const out: ScanPipelineResult = await worker.runPipeline(frame, { bufferMM });
-
       const m = out.measurement;
 
-      // Sanity checks (wide bounds; avoid rejecting valid users)
+      // Sanity checks (wide bounds)
       const mmPerPx = Number(m.mmPerPx);
       const lenB = Number(m.lengthMMBuffered);
       const widB = Number(m.widthMMBuffered);
@@ -208,17 +222,20 @@ export async function runPipelineFromVideo(
         continue;
       }
 
-      lengthSamples.push(m.lengthMM);
-      widthSamples.push(m.widthMM);
+      lengthSamples.push(Number(m.lengthMM));
+      widthSamples.push(Number(m.widthMM));
 
-      onProgress("measuring", 86, `Accumulating measurements… (${lengthSamples.length}/${minGoodFrames})`);
+      onProgress(
+        "measuring",
+        86,
+        `Accumulating measurements… (${lengthSamples.length}/${minGoodFrames})`
+      );
 
       if (lengthSamples.length >= minGoodFrames) break;
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Pipeline failed";
       lastFailure = msg;
 
-      // Surface actionable UX for commercial behavior
       const hint = toUserHintFromErrorMessage(msg);
       onProgress("detecting-card", 62, hint);
 
@@ -230,7 +247,9 @@ export async function runPipelineFromVideo(
   }
 
   if (!lengthSamples.length) {
-    const hint = lastFailure ? toUserHintFromErrorMessage(lastFailure) : "Try again with better lighting and a visible reference card.";
+    const hint = lastFailure
+      ? toUserHintFromErrorMessage(lastFailure)
+      : "Try again with better lighting and a visible reference card.";
     throw new Error(hint);
   }
 
