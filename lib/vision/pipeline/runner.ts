@@ -24,6 +24,11 @@ export type RunnerOptions = {
   maxMs?: number;
   bufferMM?: number;
   minGoodFrames?: number;
+
+  // Commercial tuning knobs (optional)
+  minStableConsecutive?: number; // default 2
+  minStability?: number; // default 0.62
+  maxMotion?: number; // default 18
 };
 
 export type RunnerResult = {
@@ -48,32 +53,12 @@ export type RunnerResult = {
     bestFrameQuality?: FrameQuality;
     bestStability?: number;
     bestMotion?: number;
-    cardRejects: number;
-    lastErrorHint?: string;
+    lastFailure?: string;
   };
 };
 
-const STABILITY_THRESHOLD = 0.74;
-const MOTION_THRESHOLD = 14.5;
-
-// Measurement sanity (wide bounds, still protective)
-const LENGTH_MM_MIN = 180;
-const LENGTH_MM_MAX = 340;
-
-// Scale sanity (mm/px); keep wide, tune later with real devices
-const MMPERPX_MIN = 0.05;
-const MMPERPX_MAX = 0.45;
-
-// Require consecutive stable frames before running pipeline
-const REQUIRED_STABLE_STREAK = 3;
-
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
-}
-
-function normalizeProgress(p: number) {
-  if (!Number.isFinite(p)) return 0;
-  return clamp(p, 0, 100);
 }
 
 function sleep(ms: number) {
@@ -81,44 +66,32 @@ function sleep(ms: number) {
 }
 
 function median(values: number[]) {
-  const arr = values.filter(Number.isFinite).slice().sort((a, b) => a - b);
-  if (arr.length === 0) return NaN;
-  const mid = Math.floor(arr.length / 2);
-  return arr.length % 2 ? arr[mid]! : (arr[mid - 1]! + arr[mid]!) / 2;
+  const s = [...values].filter(Number.isFinite).sort((a, b) => a - b);
+  if (!s.length) return NaN;
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
-function isCardOrScaleError(msg: string) {
+function normalizeProgress(p: number) {
+  if (!Number.isFinite(p)) return 0;
+  return clamp(p, 0, 100);
+}
+
+function isDebugEnabled() {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("debug") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function toUserHintFromErrorMessage(msg: string) {
   const m = msg.toLowerCase();
-  return (
-    m.includes("reference card") ||
-    m.includes("reposition card") ||
-    m.includes("scale") ||
-    m.includes("mmperpx") ||
-    m.includes("move closer") ||
-    m.includes("out of range")
-  );
-}
-
-function isFootError(msg: string) {
-  const m = msg.toLowerCase();
-  return m.includes("foot") || m.includes("contour");
-}
-
-function safeMessage(e: unknown) {
-  if (e instanceof Error && typeof e.message === "string") return e.message;
-  return "Unknown error";
-}
-
-function measurementLooksSane(out: ScanPipelineResult) {
-  const m = out.measurement;
-  if (!Number.isFinite(m.lengthMM) || !Number.isFinite(m.widthMM)) return false;
-  if (!Number.isFinite(m.lengthMMBuffered) || !Number.isFinite(m.widthMMBuffered)) return false;
-  if (!Number.isFinite(m.mmPerPx)) return false;
-
-  if (m.lengthMMBuffered < LENGTH_MM_MIN || m.lengthMMBuffered > LENGTH_MM_MAX) return false;
-  if (m.mmPerPx < MMPERPX_MIN || m.mmPerPx > MMPERPX_MAX) return false;
-
-  return true;
+  if (m.includes("reference card")) return "Reposition the reference card and try again.";
+  if (m.includes("scale")) return "Move closer and reposition the card.";
+  if (m.includes("foot")) return "Reposition your foot and ensure it is fully visible.";
+  if (m.includes("lighting")) return "Improve lighting and reduce shadows.";
+  return "Try again with better lighting and a visible reference card.";
 }
 
 export async function runPipelineFromVideo(
@@ -129,30 +102,35 @@ export async function runPipelineFromVideo(
   const worker = await getVisionWorker();
 
   const fps = opts.fps ?? 6;
-  const maxMs = opts.maxMs ?? 12_000;
+  const maxMs = opts.maxMs ?? 16_000;
   const bufferMM = opts.bufferMM ?? 2;
   const minGoodFrames = opts.minGoodFrames ?? 5;
+
+  const minStableConsecutive = opts.minStableConsecutive ?? 2;
+  const minStability = opts.minStability ?? 0.62;
+  const maxMotion = opts.maxMotion ?? 18;
 
   const frameIntervalMs = Math.max(120, Math.round(1000 / Math.max(1, fps)));
   const start = performance.now();
 
+  const debug = isDebugEnabled();
+
   let totalFrames = 0;
   let usableFrames = 0;
 
-  let stableStreak = 0;
+  let stableFrames = 0;
   let prevSig: Uint8Array | undefined;
 
   let bestQuality: FrameQuality | undefined;
   let bestStability = 0;
   let bestMotion = 999;
 
-  let cardRejects = 0;
-  let lastErrorHint: string | undefined;
-
   const lengthSamples: number[] = [];
   const widthSamples: number[] = [];
 
-  onProgress("warming-up", 2, "Initializing vision engine...");
+  let lastFailure: string | undefined;
+
+  onProgress("warming-up", 2, "Initializing vision engine…");
 
   while (performance.now() - start < maxMs) {
     totalFrames += 1;
@@ -173,82 +151,76 @@ export async function runPipelineFromVideo(
       quality: q,
       prevSignature: prevSig,
     });
-
     prevSig = stab.signature;
+
+    const stabilityOk = stab.stability >= minStability;
+    const motionOk = stab.motion <= maxMotion;
+
+    if (q.usable && stabilityOk && motionOk) stableFrames += 1;
+    else stableFrames = 0;
 
     if (!bestQuality || q.sharpness > bestQuality.sharpness) bestQuality = q;
     if (stab.stability > bestStability) bestStability = stab.stability;
     if (stab.motion < bestMotion) bestMotion = stab.motion;
 
-    const stabilityOk = stab.stability >= STABILITY_THRESHOLD;
-    const motionOk = stab.motion <= MOTION_THRESHOLD;
-
-    if (q.usable && stabilityOk && motionOk) {
-      stableStreak += 1;
-    } else {
-      stableStreak = 0;
-    }
-
-    // Warm-up UX (until we have samples)
+    // Warmup UX
     if (lengthSamples.length === 0) {
       const warmTarget = 55;
-      const p = normalizeProgress((usableFrames / minGoodFrames) * warmTarget);
+      const p = normalizeProgress((usableFrames / Math.max(1, minGoodFrames)) * warmTarget);
 
-      const msg =
-        !q.usable
-          ? "Improve lighting..."
-          : stableStreak === 0
-          ? "Hold still... stabilizing..."
-          : `Stabilizing... (${stableStreak}/${REQUIRED_STABLE_STREAK})`;
+      let msg = "Hold still… stabilizing…";
+      if (!q.usable) msg = "Improve lighting…";
+      else if (stableFrames > 0) msg = `Stabilizing… (${stableFrames}/${minStableConsecutive})`;
+
+      if (debug) {
+        msg += ` | st=${stab.stability.toFixed(2)} mo=${stab.motion.toFixed(1)} sh=${q.sharpness.toFixed(1)}`;
+      }
 
       onProgress("warming-up", p, msg);
     }
 
-    // Require stable streak before heavy work
-    if (stableStreak < REQUIRED_STABLE_STREAK) {
+    // Require consecutive stable frames before heavy pipeline
+    if (stableFrames < minStableConsecutive) {
       await sleep(frameIntervalMs);
       continue;
     }
 
-    // 5) Run pipeline only on stable frames
+    // 5) Pipeline
     try {
-      onProgress("detecting-card", 60, "Detecting reference card...");
+      onProgress("detecting-card", 60, "Detecting reference card…");
 
       const out: ScanPipelineResult = await worker.runPipeline(frame, { bufferMM });
 
-      // Hard gates (card/scale/measurement sanity)
-      if (!measurementLooksSane(out)) {
-        cardRejects += 1;
-        lastErrorHint = "Scale/card confidence too low";
-        onProgress("detecting-card", 62, "Reposition card and try again...");
+      const m = out.measurement;
+
+      // Sanity checks (wide bounds; avoid rejecting valid users)
+      const mmPerPx = Number(m.mmPerPx);
+      const lenB = Number(m.lengthMMBuffered);
+      const widB = Number(m.widthMMBuffered);
+
+      const scaleOk = Number.isFinite(mmPerPx) && mmPerPx >= 0.02 && mmPerPx <= 0.45;
+      const lenOk = Number.isFinite(lenB) && lenB >= 170 && lenB <= 360;
+      const widOk = Number.isFinite(widB) && widB >= 50 && widB <= 155;
+
+      if (!scaleOk || !lenOk || !widOk) {
+        lastFailure = "Sanity check rejected (scale/size out of range)";
         await sleep(frameIntervalMs);
         continue;
       }
 
-      const m = out.measurement;
-
       lengthSamples.push(m.lengthMM);
       widthSamples.push(m.widthMM);
 
-      onProgress("measuring", 86, "Accumulating measurements...");
+      onProgress("measuring", 86, `Accumulating measurements… (${lengthSamples.length}/${minGoodFrames})`);
 
-      if (lengthSamples.length >= minGoodFrames) {
-        break;
-      }
+      if (lengthSamples.length >= minGoodFrames) break;
     } catch (e) {
-      const msg = safeMessage(e);
+      const msg = e instanceof Error ? e.message : "Pipeline failed";
+      lastFailure = msg;
 
-      if (isCardOrScaleError(msg)) {
-        cardRejects += 1;
-        lastErrorHint = msg;
-        onProgress("detecting-card", 62, "Reposition card and try again...");
-      } else if (isFootError(msg)) {
-        lastErrorHint = msg;
-        onProgress("detecting-foot", 70, "Reposition foot and keep it fully visible...");
-      } else {
-        lastErrorHint = msg;
-        onProgress("warming-up", 40, "Adjust lighting and keep still...");
-      }
+      // Surface actionable UX for commercial behavior
+      const hint = toUserHintFromErrorMessage(msg);
+      onProgress("detecting-card", 62, hint);
 
       await sleep(frameIntervalMs);
       continue;
@@ -257,22 +229,22 @@ export async function runPipelineFromVideo(
     await sleep(frameIntervalMs);
   }
 
-  if (lengthSamples.length === 0) {
-    throw new Error("Reliable measurement not achieved.");
+  if (!lengthSamples.length) {
+    const hint = lastFailure ? toUserHintFromErrorMessage(lastFailure) : "Try again with better lighting and a visible reference card.";
+    throw new Error(hint);
   }
 
-  // Median fusion
   const lengthMM = median(lengthSamples);
   const widthMM = median(widthSamples);
 
   if (!Number.isFinite(lengthMM) || !Number.isFinite(widthMM)) {
-    throw new Error("Measurement fusion failed.");
+    throw new Error("Measurement unstable. Try again with better lighting and hold still.");
   }
 
   const lengthMMBuffered = lengthMM + bufferMM;
   const widthMMBuffered = widthMM + bufferMM;
 
-  onProgress("converting", 95, "Finalizing sizes...");
+  onProgress("converting", 95, "Finalizing sizes…");
 
   const sizes = await worker.convertOnly({ lengthMMBuffered });
 
@@ -288,14 +260,12 @@ export async function runPipelineFromVideo(
     debug: {
       totalFrames,
       usableFrames,
-      stableFrames: stableStreak,
+      stableFrames,
       samplesUsed: lengthSamples.length,
       bestFrameQuality: bestQuality,
       bestStability,
       bestMotion,
-      cardRejects,
-      lastErrorHint,
+      lastFailure,
     },
   };
 }
-
