@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Script from "next/script";
+
 import "./globals.css";
 
 const inter = Inter({
@@ -20,6 +22,12 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={inter.variable}>
+      <head>
+        <Script
+          src="https://docs.opencv.org/4.x/opencv.js"
+          strategy="beforeInteractive"
+        />
+      </head>
       <body className="app-bg min-h-dvh font-sans">
         <div className="min-h-dvh safe-top safe-bottom">{children}</div>
       </body>

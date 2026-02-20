@@ -102,6 +102,9 @@ export function ScanPanel({
         <Dialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm" />
 
         <Dialog.Content className="fixed left-1/2 top-1/2 w-[min(94vw,520px)] -translate-x-1/2 -translate-y-1/2 ui-surface p-3 shadow-soft outline-none">
+        <Dialog.Title className="sr-only">
+  Foot scanning camera
+</Dialog.Title>
           {/* Header row */}
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <div className="flex items-center gap-2">

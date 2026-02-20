@@ -10,7 +10,10 @@ import { SearchBar } from "@/components/ui/search-bar";
 import { SizeChips, type FootSizes } from "@/components/ui/size-chips";
 import { ScanPanel, type ScanStep } from "@/components/ui/scan-panel";
 import { Toast } from "@/components/ui/toast";
+
 import { MARKETPLACES } from "@/lib/marketplaces";
+import { buildMarketplaceUrl } from "@/lib/marketplaces/buildUrl";
+import { runPipelineFromVideo } from "@/lib/vision/pipeline/runner";
 
 type FlowState = "idle" | "scanning" | "done";
 
@@ -81,7 +84,9 @@ function playSuccessChime() {
     window.setTimeout(() => {
       try {
         ctx.close();
-      } catch {}
+      } catch {
+        // ignore
+      }
     }, 900);
   } catch {
     // ignore
@@ -92,6 +97,9 @@ export default function HomePage() {
   const [flow, setFlow] = React.useState<FlowState>("idle");
   const [sizes, setSizes] = React.useState<FootSizes | null>(null);
   const [query, setQuery] = React.useState("");
+
+  // stored internally for later fit filtering (not shown yet)
+  const [footWidthMM, setFootWidthMM] = React.useState<number | null>(null);
 
   const [prepOpen, setPrepOpen] = React.useState(false);
 
@@ -114,6 +122,21 @@ export default function HomePage() {
     title: "",
     description: "",
   });
+
+  // Prevent zombie updates when closing / rescan
+  const timersRef = React.useRef<number[]>([]);
+  const scanningRef = React.useRef(false);
+
+  function schedule(fn: () => void, ms: number) {
+    const id = window.setTimeout(fn, ms);
+    timersRef.current.push(id);
+    return id;
+  }
+
+  function stopScanTimers() {
+    timersRef.current.forEach((id) => window.clearTimeout(id));
+    timersRef.current = [];
+  }
 
   function showToast(next: Omit<ToastState, "open">) {
     setToast({ ...next, open: true });
@@ -193,18 +216,30 @@ export default function HomePage() {
     setScanProgress(0);
     setScanMessage(undefined);
     setCameraError(null);
+    stopScanTimers();
+    scanningRef.current = false;
   }
 
   function closeScan() {
+    stopScanTimers();
     stopCamera();
     resetScanUI();
 
     if (flow === "scanning" && !sizes) setFlow("idle");
   }
 
+  function ensureMediaDevicesOrThrow() {
+    // Some iOS contexts / in-app browsers may not expose mediaDevices.
+    if (typeof navigator === "undefined") throw new Error("Browser not supported.");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("Camera not available. Use HTTPS and Safari/Chrome.");
+    }
+  }
+
   async function startScan() {
-    // reset previous
+    stopScanTimers();
     setSizes(null);
+    setFootWidthMM(null);
     setFlow("scanning");
 
     setScanOpen(true);
@@ -213,7 +248,11 @@ export default function HomePage() {
     setScanMessage("Requesting camera access…");
     setCameraError(null);
 
+    scanningRef.current = true;
+
     try {
+      ensureMediaDevicesOrThrow();
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
@@ -235,63 +274,102 @@ export default function HomePage() {
 
       if (canTorch) {
         await setTorch(true);
-        setScanMessage(
-          "Torch enabled. Place your foot + any card with standard bank card size."
-        );
+        setScanMessage("Torch enabled. Place your foot + a standard bank card in frame.");
       } else {
-        setScanMessage("Place your foot + any card with standard bank card size.");
+        setScanMessage("Place your foot + a standard bank card in frame.");
       }
 
+      // Guided pre-roll, then real 12s runner
       setScanStep("card");
-      setScanProgress(25);
+      setScanProgress(18);
 
-      window.setTimeout(() => {
+      schedule(() => {
+        if (!scanningRef.current) return;
         setScanStep("foot");
-        setScanProgress(45);
+        setScanProgress(35);
         setScanMessage("Align your foot inside the frame.");
-      }, 900);
+      }, 700);
 
-      window.setTimeout(() => {
+      schedule(() => {
+        if (!scanningRef.current) return;
         setScanStep("steady");
-        setScanProgress(65);
-        setScanMessage("Hold still… scanning edges.");
-      }, 1800);
+        setScanProgress(52);
+        setScanMessage("Hold still… capturing stable frames.");
+      }, 1400);
 
-      window.setTimeout(() => {
-        setScanStep("measuring");
-        setScanProgress(85);
-        setScanMessage("Measuring… converting sizes.");
-      }, 2800);
+      schedule(() => {
+        void (async () => {
+          if (!scanningRef.current) return;
 
-      window.setTimeout(() => {
-        // ✅ IMPORTANT: mm is still stored (required by FootSizes type),
-        // but you can hide it in the UI (SizeChips component).
-        const result: FootSizes = {
-          mm: 265,
-          eu: "42",
-          us: "9",
-          uk: "8",
-          jp: "26.5",
-        };
+          try {
+            if (!videoRef.current) throw new Error("Video not ready.");
 
-        setSizes(result);
-        setScanStep("done");
-        setScanProgress(100);
-        setScanMessage("Done. Your size is ready.");
-        setFlow("done");
+            const result = await runPipelineFromVideo(
+              videoRef.current,
+              (state, progress, message) => {
+                if (!scanningRef.current) return;
 
-        playSuccessChime();
-        showToast({
-          type: "success",
-          title: "Scan complete",
-          description: `EU ${result.eu} • US ${result.us} • UK ${result.uk} • JP ${result.jp}`,
-        });
+                if (state === "warming-up") setScanStep("steady");
+                if (state === "detecting-card") setScanStep("card");
+                if (state === "detecting-foot") setScanStep("foot");
+                if (state === "measuring") setScanStep("measuring");
+                if (state === "converting") setScanStep("measuring");
 
-        window.setTimeout(() => {
-          stopCamera();
-          resetScanUI();
-        }, 900);
-      }, 3800);
+                setScanProgress(progress);
+                if (message) setScanMessage(message);
+              },
+              {
+                bufferMM: 2,
+                fps: 6,
+                maxMs: 12000,
+                minGoodFrames: 5,
+              }
+            );
+
+            setFootWidthMM(result.measurement.widthMMBuffered);
+
+            setSizes({
+              mm: Math.round(result.measurement.lengthMMBuffered),
+              eu: result.sizes.eu,
+              us: result.sizes.us,
+              uk: result.sizes.uk,
+              jp: result.sizes.jp,
+            });
+
+            setScanStep("done");
+            setScanProgress(100);
+            setScanMessage("Done. Your size is ready.");
+            setFlow("done");
+
+            playSuccessChime();
+            showToast({
+              type: "success",
+              title: "Scan complete",
+              description: `EU ${result.sizes.eu} • US ${result.sizes.us} • UK ${result.sizes.uk} • JP ${result.sizes.jp}`,
+            });
+
+            schedule(() => {
+              stopCamera();
+              resetScanUI();
+            }, 900);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : "Scan failed.";
+            setCameraError(msg);
+            setScanStep("error");
+            setScanProgress(0);
+            setScanMessage("Could not measure. Try again with better lighting.");
+
+            showToast({
+              type: "error",
+              title: "Scan failed",
+              description: "Try again with better lighting and a visible reference card.",
+            });
+
+            stopCamera();
+            scanningRef.current = false;
+          }
+        })();
+      }, 2100);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unable to access camera.";
 
@@ -307,6 +385,7 @@ export default function HomePage() {
       });
 
       stopCamera();
+      scanningRef.current = false;
     }
   }
 
@@ -332,9 +411,7 @@ export default function HomePage() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs text-muted">CaveCheck</p>
-                <h1 className="text-xl font-semibold tracking-tight">
-                  Perfect fit, instantly.
-                </h1>
+                <h1 className="text-xl font-semibold tracking-tight">Perfect fit, instantly.</h1>
               </div>
 
               <button
@@ -349,8 +426,8 @@ export default function HomePage() {
             <div className="mt-4 ui-divider" />
 
             <p className="mt-4 text-sm text-muted">
-              Scan with a standard-size reference card. We’ll show your converted
-              size in EU/US/UK/JP and unlock marketplaces.
+              Scan with a standard-size reference card. We’ll show your converted size in EU/US/UK/JP and unlock
+              marketplaces.
             </p>
           </div>
         </header>
@@ -363,12 +440,8 @@ export default function HomePage() {
 
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="rounded-2xl border border-white/15 bg-black/20 px-4 py-3 backdrop-blur">
-                  <p className="text-sm">
-                    {sizes ? "Size captured." : "Ready when you are."}
-                  </p>
-                  <p className="mt-1 text-xs text-muted">
-                    {sizes ? "You can rescan anytime." : "Tap Start scan to begin."}
-                  </p>
+                  <p className="text-sm">{sizes ? "Size captured." : "Ready when you are."}</p>
+                  <p className="mt-1 text-xs text-muted">{sizes ? "You can rescan anytime." : "Tap Start scan to begin."}</p>
                 </div>
               </div>
 
@@ -387,7 +460,6 @@ export default function HomePage() {
             </div>
 
             <div className="px-4 py-4">
-              {/* Note: SizeChips should render only EU/US/UK/JP (hide mm there) */}
               <SizeChips sizes={sizes} />
             </div>
           </div>
@@ -398,16 +470,10 @@ export default function HomePage() {
           <SearchBar
             value={query}
             onChange={setQuery}
-            placeholder={
-              marketplacesEnabled
-                ? "Search: running, hiking, Nike, Adidas…"
-                : "Scan first to unlock search…"
-            }
+            placeholder={marketplacesEnabled ? "Search: running, hiking, Nike, Adidas…" : "Scan first to unlock search…"}
           />
           {!marketplacesEnabled && (
-            <p className="mt-2 text-xs text-muted">
-              Search and marketplace links unlock after you scan your foot.
-            </p>
+            <p className="mt-2 text-xs text-muted">Search and marketplace links unlock after you scan your foot.</p>
           )}
         </div>
 
@@ -439,9 +505,7 @@ export default function HomePage() {
           <div className="ui-surface px-4 py-4">
             <div>
               <h2 className="text-sm font-medium">Marketplaces</h2>
-              <p className="mt-1 text-sm text-muted">
-                Opens results filtered by your measured size.
-              </p>
+              <p className="mt-1 text-sm text-muted">Opens results filtered by your measured size.</p>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-3">
@@ -451,11 +515,22 @@ export default function HomePage() {
                   name={m.name}
                   enabled={marketplacesEnabled}
                   onClick={() => {
-                    window.alert(
-                      `Open ${m.name}\nEU size: ${sizes?.eu ?? "-"}\nQuery: ${
-                        query || "(none)"
-                      }`
-                    );
+                    if (!sizes) return;
+
+                    const built = buildMarketplaceUrl({
+                      marketplaceId: m.id,
+                      query,
+                      brandId: "generic",
+                      gender: "unisex",
+                      footLengthMM: sizes.mm,
+                      bufferMM: 2,
+                      eu: sizes.eu,
+                      us: sizes.us,
+                      uk: sizes.uk,
+                      jp: sizes.jp,
+                    });
+
+                    window.open(built.url, "_blank", "noopener,noreferrer");
                   }}
                 />
               ))}
@@ -468,42 +543,28 @@ export default function HomePage() {
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm" />
             <Dialog.Content className="fixed left-1/2 top-1/2 w-[min(92vw,420px)] -translate-x-1/2 -translate-y-1/2 ui-surface px-5 py-5 shadow-soft outline-none">
-              <Dialog.Title className="text-base font-semibold tracking-tight">
-                Before you scan
-              </Dialog.Title>
-              <Dialog.Description className="mt-2 text-sm text-muted">
-                You’ll need:
-              </Dialog.Description>
+              <Dialog.Title className="text-base font-semibold tracking-tight">Before you scan</Dialog.Title>
+              <Dialog.Description className="mt-2 text-sm text-muted">You’ll need:</Dialog.Description>
 
               <div className="mt-4 space-y-3">
                 <div className="ui-surface-2 px-3 py-3">
                   <p className="text-sm font-medium">A standard-size card</p>
-                  <p className="mt-1 text-xs text-muted">
-                    Any card with standard bank card size works as reference.
-                  </p>
+                  <p className="mt-1 text-xs text-muted">Any standard bank card works as reference.</p>
                 </div>
 
                 <div className="ui-surface-2 px-3 py-3">
                   <p className="text-sm font-medium">Good lighting</p>
-                  <p className="mt-1 text-xs text-muted">
-                    Torch will be enabled automatically if supported.
-                  </p>
+                  <p className="mt-1 text-xs text-muted">Torch will be enabled automatically if supported.</p>
                 </div>
 
                 <div className="ui-surface-2 px-3 py-3">
                   <p className="text-sm font-medium">Flat surface</p>
-                  <p className="mt-1 text-xs text-muted">
-                    Keep your foot and the card on the same plane.
-                  </p>
+                  <p className="mt-1 text-xs text-muted">Keep your foot and the card on the same plane.</p>
                 </div>
               </div>
 
               <div className="mt-5 flex gap-3">
-                <Button
-                  variant="secondary"
-                  className="w-full"
-                  onClick={() => setPrepOpen(false)}
-                >
+                <Button variant="secondary" className="w-full" onClick={() => setPrepOpen(false)}>
                   Cancel
                 </Button>
                 <Button className="w-full" onClick={onGotIt}>
