@@ -19,7 +19,7 @@ type Options = {
 const DEFAULTS: Required<Options> = {
   thumbW: 32,
   thumbH: 18,
-  motionClamp: 22, // tuned baseline; calibrate later with real device data
+  motionClamp: 40, // tuned baseline; calibrate later with real device data
 };
 
 function clamp01(x: number) {

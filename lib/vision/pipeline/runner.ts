@@ -108,8 +108,8 @@ export async function runPipelineFromVideo(
   const minGoodFrames = opts.minGoodFrames ?? 5;
 
   const minStableConsecutive = opts.minStableConsecutive ?? 2;
-  const minStability = opts.minStability ?? 0.62;
-  const maxMotion = opts.maxMotion ?? 18;
+const minStability = opts.minStability ?? 0.50;
+const maxMotion = opts.maxMotion ?? 22;
 
   const frameIntervalMs = Math.max(120, Math.round(1000 / Math.max(1, fps)));
   const start = performance.now();
@@ -171,9 +171,11 @@ export async function runPipelineFromVideo(
     const stabilityOk = stab.stability >= minStability;
     const motionOk = stab.motion <= maxMotion;
 
-    if (q.usable && stabilityOk && motionOk) stableFrames += 1;
-    else stableFrames = 0;
-
+    if (q.usable && stabilityOk && motionOk) {
+  stableFrames += 1;
+} else {
+  stableFrames = Math.max(0, stableFrames - 1);
+}
     if (!bestQuality || q.sharpness > bestQuality.sharpness) bestQuality = q;
     if (stab.stability > bestStability) bestStability = stab.stability;
     if (stab.motion < bestMotion) bestMotion = stab.motion;
