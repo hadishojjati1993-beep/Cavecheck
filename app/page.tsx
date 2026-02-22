@@ -93,6 +93,17 @@ function playSuccessChime() {
   }
 }
 
+function getMarketplaceIdAndName(m: unknown): { id: string; name: string } | null {
+  if (typeof m === "string") return { id: m, name: m };
+  if (m && typeof m === "object") {
+    const obj = m as Record<string, unknown>;
+    const id = typeof obj.id === "string" ? obj.id : null;
+    const name = typeof obj.name === "string" ? obj.name : id;
+    if (id && name) return { id, name };
+  }
+  return null;
+}
+
 export default function HomePage() {
   const [flow, setFlow] = React.useState<FlowState>("idle");
   const [sizes, setSizes] = React.useState<FootSizes | null>(null);
@@ -229,7 +240,6 @@ export default function HomePage() {
   }
 
   function ensureMediaDevicesOrThrow() {
-    // Some iOS contexts / in-app browsers may not expose mediaDevices.
     if (typeof navigator === "undefined") throw new Error("Browser not supported.");
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error("Camera not available. Use HTTPS and Safari/Chrome.");
@@ -245,7 +255,7 @@ export default function HomePage() {
     setScanOpen(true);
     setScanStep("permission");
     setScanProgress(5);
-    setScanMessage("Requesting camera access…");
+    setScanMessage("Requesting camera access...");
     setCameraError(null);
 
     scanningRef.current = true;
@@ -279,7 +289,7 @@ export default function HomePage() {
         setScanMessage("Place your foot + a standard bank card in frame.");
       }
 
-      // Guided pre-roll, then real 12s runner
+      // Guided pre-roll, then real runner
       setScanStep("card");
       setScanProgress(18);
 
@@ -294,7 +304,7 @@ export default function HomePage() {
         if (!scanningRef.current) return;
         setScanStep("steady");
         setScanProgress(52);
-        setScanMessage("Hold still… capturing stable frames.");
+        setScanMessage("Hold still... capturing stable frames.");
       }, 1400);
 
       schedule(() => {
@@ -454,7 +464,7 @@ export default function HomePage() {
                   isLoading={flow === "scanning"}
                   onClick={onScanClick}
                 >
-                  {flow === "scanning" ? "Scanning…" : sizes ? "Rescan" : "Start scan"}
+                  {flow === "scanning" ? "Scanning..." : sizes ? "Rescan" : "Start scan"}
                 </Button>
               </div>
             </div>
@@ -470,7 +480,7 @@ export default function HomePage() {
           <SearchBar
             value={query}
             onChange={setQuery}
-            placeholder={marketplacesEnabled ? "Search: running, hiking, Nike, Adidas…" : "Scan first to unlock search…"}
+            placeholder={marketplacesEnabled ? "Search: running, hiking, Nike, Adidas..." : "Scan first to unlock search..."}
           />
           {!marketplacesEnabled && (
             <p className="mt-2 text-xs text-muted">Search and marketplace links unlock after you scan your foot.</p>
@@ -509,31 +519,46 @@ export default function HomePage() {
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-3">
-              {MARKETPLACES.map((m) => (
-                <MarketplaceButton
-                  key={m.id}
-                  name={m.name}
-                  enabled={marketplacesEnabled}
-                  onClick={() => {
-                    if (!sizes) return;
+              {MARKETPLACES.map((m) => {
+                const info = getMarketplaceIdAndName(m);
+                if (!info) return null;
 
-                    const built = buildMarketplaceUrl({
-                      marketplaceId: m.id,
-                      query,
-                      brandId: "generic",
-                      gender: "unisex",
-                      footLengthMM: sizes.mm,
-                      bufferMM: 2,
-                      eu: sizes.eu,
-                      us: sizes.us,
-                      uk: sizes.uk,
-                      jp: sizes.jp,
-                    });
+                return (
+                  <MarketplaceButton
+                    key={info.id}
+                    name={info.name}
+                    enabled={marketplacesEnabled}
+                    onClick={() => {
+                      if (!sizes) return;
 
-                    window.open(built.url, "_blank", "noopener,noreferrer");
-                  }}
-                />
-              ))}
+                      const built = buildMarketplaceUrl(info.id, {
+                        query,
+                        brandId: "generic",
+                        productId: "",
+                        size: {
+                          eu: sizes.eu,
+                          us: sizes.us,
+                          uk: sizes.uk,
+                          jp: sizes.jp,
+                        },
+                        locale: typeof navigator !== "undefined" ? navigator.language : "en-US",
+                        country: "",
+                        currency: "",
+
+                        // optional extra fields (allowed by index signature in types)
+                        gender: "unisex",
+                        footLengthMM: sizes.mm,
+                        bufferMM: 2,
+                        footWidthMM: footWidthMM ?? undefined,
+                      });
+
+                      if (!built) return;
+
+                      window.open(built.url, "_blank", "noopener,noreferrer");
+                    }}
+                  />
+                );
+              })}
             </div>
           </div>
         </section>

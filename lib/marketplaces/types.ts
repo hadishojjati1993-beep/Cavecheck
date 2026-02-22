@@ -1,33 +1,33 @@
+// lib/marketplaces/types.ts
+
+export type MarketplaceSize = {
+  us?: string;
+  uk?: string;
+  eu?: string;
+  jp?: string;
+};
+
 export type MarketplaceBuildInput = {
   query?: string;
   brandId?: string;
   productId?: string;
 
-  // optional sizing info
-  size?: {
-    us?: string;
-    uk?: string;
-    eu?: string;
-    jp?: string;
-  };
+  size?: MarketplaceSize;
 
-  // optional context
-  locale?: string;
-  country?: string;
-  currency?: string;
+  locale?: string;   // e.g. "en-US"
+  country?: string;  // e.g. "US"
+  currency?: string; // e.g. "USD"
 
-  // allow providers to accept extra data without breaking types
   [key: string]: unknown;
 };
 
 export type MarketplaceBuildOutput = {
   marketplaceId: string;
   url: string;
-  // optional metadata
-  [key: string]: unknown;
+  meta?: Record<string, unknown>;
 };
 
 export type MarketplaceProvider = {
   id: string;
-  build: (input: MarketplaceBuildInput) => MarketplaceBuildOutput;
+  build: (input: MarketplaceBuildInput) => MarketplaceBuildOutput | null;
 };
