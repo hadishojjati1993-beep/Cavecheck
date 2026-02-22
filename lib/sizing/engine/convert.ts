@@ -1,5 +1,5 @@
 // lib/sizing/engine/convert.ts
-import type { BrandSizing, SizeCategory, SizeRow } from "../types";
+import type { BrandSizing, SizeCategory, SizeRow } from "../brandcharts/types";
 import { resolveCategory } from "./resolveCategory";
 
 export type ConversionResult = {

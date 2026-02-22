@@ -1,4 +1,5 @@
-import type { Metadata } from "next";
+// app/layout.tsx
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import Script from "next/script";
 
@@ -13,8 +14,11 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "CaveCheck",
   description: "Measure your foot size and shop the perfect fit.",
-  themeColor: "#0A0A0C",
   icons: [{ rel: "icon", url: "/favicon.ico" }],
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0A0A0B",
 };
 
 export default function RootLayout({
